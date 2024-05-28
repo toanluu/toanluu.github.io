@@ -141,7 +141,7 @@ def clean_html(raw_html):
     return ''.join(ElementTree.fromstring(raw_html).itertext())
 
 
-def get_ronto_id(name):
+def get_id_from_name(name):
     if name is None:
         return None
     return normalized(name, lowercase=False, folding=True, delimiter='_')

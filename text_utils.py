@@ -1,33 +1,62 @@
 # encoding: utf-8
-"""
-Simple text normalization utility. Used to remove stop words and fold special characters
-"""
+
 import re
 import unicodedata
+from xml.etree import ElementTree
+
+import regex
+
+"""
+Simple text normalization utility. Used to tokenize, folding, remove stop words
+"""
+
+# Reference of map: https://docs.oracle.com/cd/E29584_01/webhelp/mdex_basicDev/src/rbdv_chars_mapping.html
+DIACRITICAL_CHAR_MAP = {
+    'Æ': 'A',
+    'Đ': 'D',
+    'đ': 'd',
+    'ø': 'o',
+    'Ð': 'D',
+    'Ø': 'O',
+    'þ': 'P',
+    'Þ': 'p',
+    'ß': 's',
+    'ð': 'd',
+    'æ': 'a',
+    'Ħ': 'H',
+    'ħ': 'h',
+    'ı': 'i',
+    'Ĳ': 'I',
+    'ĳ': 'i',
+    'ĸ': 'K',
+    'l': 'l',
+    'Ŀ': 'L',
+    'ŀ': 'l',
+    'Ł': 'L',
+    'ł': 'l',
+    'Ŋ': 'N',
+    'ŋ': 'n',
+    'ŉ': 'n',
+    'Œ': 'O',
+    'œ': 'o',
+    'ſ': 's',
+    'Ŧ': 'T',
+    'ŧ': 't'
+}
+
+TRANS = str.maketrans(DIACRITICAL_CHAR_MAP)
 
 
-def get_stopwords_vi():
-    s = set()
-    with open('resources/stopwords_vi.txt', mode='rt', encoding='utf-8') as f:
-        for l in f.readlines():
-            s.add(l.strip())
-    return s
-
-
-def fold(text):
+def normalise_to_ascii(text):
     """
     Strip accent from the text, e.g: ü => u, é=>e
     """
-    s = ''
-    for c in unicodedata.normalize('NFD', text):
-        if c == 'đ' or c == 'ð':
-            s = s + 'd'
-        elif unicodedata.category(c) != 'Mn':
-            s = s + c
-    return s
+    text = unicodedata.normalize("NFD", text)
+    text = regex.sub(r"\p{Mark}+", "", text, flags=regex.V1)
+    return text.translate(TRANS)
 
 
-def tokenized(text, stopwords=None, folding=None, max_words=None):
+def tokenized(text, stopwords=None, lowercase=True, folding=None, max_words=None, synonyms=None):
     """
     Split a text to a list of tokens
     """
@@ -36,17 +65,24 @@ def tokenized(text, stopwords=None, folding=None, max_words=None):
     pattern = re.compile(r"\W+", re.UNICODE)
     tokens = []
     if folding:
-        text = fold(text)
-    for token in pattern.split(text.lower()):
+        text = normalise_to_ascii(text)
+    if lowercase:
+        text = text.lower()
+    for token in pattern.split(text):
         if token and (not stopwords or token not in stopwords):
+            if synonyms is not None:
+                synonym = synonyms.get(token)
+                if synonym:
+                    token = synonym
+
             tokens.append(token)
             if max_words and len(tokens) >= max_words:
                 break
     return tokens
 
 
-def normalized(text, blacklist_patterns=None, stopwords=None, folding=None,
-               max_words=None, delimiter=' '):
+def normalized(text, blacklist_patterns=None, stopwords=None, lowercase=True, folding=None,
+               max_words=None, delimiter=' ', synonyms=None):
     """
     Simple normalization of the text by folding, convert to lower, remove
     pattern remove stopwords
@@ -55,86 +91,57 @@ def normalized(text, blacklist_patterns=None, stopwords=None, folding=None,
         generic_pattern = '(%s)' % '|'.join(blacklist_patterns)
         pattern = re.compile(generic_pattern)
         text = pattern.sub(' ', text)
-    tokens = tokenized(text, stopwords=stopwords, folding=folding, max_words=max_words)
-    return delimiter.join(tokens).lower()
+    tokens = tokenized(text, stopwords=stopwords, lowercase=lowercase, folding=folding, max_words=max_words,
+                       synonyms=synonyms)
+    return delimiter.join(tokens)
 
 
-def get_ngrams(text, n, stopwords=None, folding=None):
-    tokens = tokenized(text, stopwords=stopwords, folding=folding, max_words=None)
-    ngrams = []
-    for i in range(0, len(tokens) - n + 1):
-        ngrams.append(' '.join(tokens[i:i + n]))
-    return ngrams
-
-
-def get_all_ngrams(text, stopwords=None, folding=None):
-    tokens = tokenized(text, stopwords=stopwords, folding=folding, max_words=None)
-    ngrams = []
-    for n in reversed(range(1, len(tokens) + 1)):
-        for i in range(0, len(tokens) - n + 1):
-            ngrams.append(' '.join(tokens[i:i + n]))
-    return ngrams
+def is_safe_encoding(s):
+    """Check string contain only alpha digit assci and _ for safe encoding"""
+    return bool(re.match(r"^[A-Za-z0-9_]+$", s))
 
 
 def get_uri(text):
     return '-'.join(tokenized(text, folding=True))
 
 
-def get_fingerprint(text):
+def get_fingeprint(text):
     """
     return finger print of a text, used for simple deduplicate
     """
     return '_'.join(sorted(tokenized(text, folding=True)))
 
 
-def get_jaccard(text1, text2, stopwords=None):
-    words1 = tokenized(text1, stopwords=stopwords)
-    words2 = tokenized(text2, stopwords=stopwords)
+def concat_tokenized(text, stopwords=None, folding=None, max_words=None, synonyms=None):
+    """
+    return concatenation of tokens after apply tokenization
+    """
+    return ''.join(tokenized(text, stopwords=stopwords, folding=folding, max_words=max_words, synonyms=synonyms))
 
-    return get_jaccard_from_words(words1, words2, stopwords=stopwords)
 
-
-def get_jaccard_from_words(words1, words2, stopwords=None):
-    if not words1 or not words2:
+def jaccard(text1, text2, stopwords=None, folding=True, synonyms=None):
+    """
+    Compute jaccard  similarity between 2 texts: https://en.wikipedia.org/wiki/Jaccard_index
+    :return: value between 0-1
+    """
+    if not text1 or not text2:
         return 0
 
-    s1 = set(words1)
-    s2 = set(words2)
-    overlap = s1
-    overlap = overlap.intersection(s2)
-    union = s1
-    union = union.union(s2)
-
+    s1 = set(tokenized(text1, folding=folding, stopwords=stopwords, synonyms=synonyms))
+    s2 = set(tokenized(text2, folding=folding, stopwords=stopwords, synonyms=synonyms))
+    overlap = s1.intersection(s2)
+    union = s1.union(s2)
     return len(overlap) * 1.0 / len(union)
 
 
-def no_accent_vietnamese(s):
-    s = re.sub(u'[àáạảãâầấậẩẫăằắặẳẵ]', 'a', s)
-    s = re.sub(u'[ÀÁẠẢÃĂẰẮẶẲẴÂẦẤẬẨẪ]', 'A', s)
-    s = re.sub(u'[èéẹẻẽêềếệểễ]', 'e', s)
-    s = re.sub(u'[ÈÉẸẺẼÊỀẾỆỂỄ]', 'E', s)
-    s = re.sub(u'[òóọỏõôồốộổỗơờớợởỡ]', 'o', s)
-    s = re.sub(u'[ÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠ]', 'O', s)
-    s = re.sub(u'[ìíịỉĩ]', 'i', s)
-    s = re.sub(u'[ÌÍỊỈĨ]', 'I', s)
-    s = re.sub(u'[ùúụủũưừứựửữ]', 'u', s)
-    s = re.sub(u'[ƯỪỨỰỬỮÙÚỤỦŨ]', 'U', s)
-    s = re.sub(u"[ỳýỵỷỹ]", 'y', s)
-    s = re.sub(u'[ỲÝỴỶỸ]', 'Y', s)
-    s = re.sub(u'[Đ]', 'D', s)
-    s = re.sub(u"[đ]", 'd', s)
-    return s
+def clean_html(raw_html):
+    """
+    Clean html tags from a text
+    """
+    return ''.join(ElementTree.fromstring(raw_html).itertext())
 
 
-def create_slug(_id, _name):
-    _id = str(_id).strip()
-    _name = remove_special_char(_name)
-    return f"{_name}-{_id}"
-
-
-def remove_special_char(_text):
-    _text = re.sub(' +', ' ', _text)
-    _text = re.sub(r'[^\w0-9- ]+', "", _text)
-    _text = fold(re.sub(r'\s', "-", _text).lower())
-    _text = re.sub('[-]+', '-', _text)
-    return _text
+def get_ronto_id(name):
+    if name is None:
+        return None
+    return normalized(name, lowercase=False, folding=True, delimiter='_')
